@@ -1,7 +1,26 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'firebase_options.dart';
+import 'package:url_launcher/url_launcher.dart';
 
-void main() {
+final AudioPlayer audioPlayer = AudioPlayer();
+
+bool alertSoundEnabled = true;
+bool notificationsEnabled = true;
+bool fireDetectedGlobal = false;
+
+double? smokeLevel;
+double? flameLevel;
+StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? sensorSubscription;
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
   runApp(const SafeFiDApp());
 }
 
@@ -66,7 +85,7 @@ class _SplashScreenState extends State<SplashScreen> {
                 shape: BoxShape.circle,
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.25),
+                    color: Colors.black.withValues(alpha: 0.25),
                     blurRadius: 15,
                   ),
                 ],
@@ -128,6 +147,75 @@ class _HomeDashboardState extends State<HomeDashboard> {
   int selectedIndex = 0;
 
   @override
+  void initState() {
+    super.initState();
+
+    sensorSubscription = FirebaseFirestore.instance
+        .collection('sensor_readings')
+        .doc('0AuxMVjVKQlGcpaIBnVP')
+        .snapshots()
+        .listen(
+          (snapshot) async {
+            if (!snapshot.exists) return;
+
+            final data = snapshot.data();
+            if (data == null) return;
+
+            final smoke = data['smoke'];
+            final flame = data['flame'];
+
+            if (smoke is! num || flame is! num) return;
+
+            final newSmoke = smoke.toDouble();
+            final newFlame = flame.toDouble();
+
+            final alarmTriggered = newSmoke > 30 || newFlame < 600;
+
+            final wasAlarmTriggered = fireDetectedGlobal;
+
+            if (!mounted) return;
+
+            setState(() {
+              smokeLevel = newSmoke;
+              flameLevel = newFlame;
+              fireDetectedGlobal = alarmTriggered;
+            });
+
+            if (alarmTriggered && !wasAlarmTriggered) {
+              await FirebaseFirestore.instance.collection('fire_alerts').add({
+                'status': newSmoke > 30 && newFlame < 600
+                    ? 'SMOKE AND FLAME ALERT'
+                    : newSmoke > 30
+                    ? 'SMOKE ALERT'
+                    : 'FLAME ALERT',
+                'location': 'Room 3, Second Floor',
+                'smoke': newSmoke,
+                'flame': newFlame,
+                'timestamp': FieldValue.serverTimestamp(),
+              });
+
+              if (alertSoundEnabled) {
+                await audioPlayer.play(AssetSource('siren.mp3'));
+              }
+            }
+
+            if (!alarmTriggered && wasAlarmTriggered) {
+              await audioPlayer.stop();
+            }
+          },
+          onError: (Object error) {
+            debugPrint('Sensor stream error: $error');
+          },
+        );
+  }
+
+  @override
+  void dispose() {
+    sensorSubscription?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -137,17 +225,6 @@ class _HomeDashboardState extends State<HomeDashboard> {
           'SafeFiD',
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.notifications),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => const AlertScreen()),
-              );
-            },
-          ),
-        ],
       ),
 
       body: _buildBody(),
@@ -164,10 +241,12 @@ class _HomeDashboardState extends State<HomeDashboard> {
           });
         },
 
-        items: const [
+        items: [
           BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
           BottomNavigationBarItem(
-            icon: Icon(Icons.notifications),
+            icon: fireDetectedGlobal
+                ? const Icon(Icons.notifications_active, color: Colors.red)
+                : const Icon(Icons.notifications_none),
             label: 'Alerts',
           ),
           BottomNavigationBarItem(icon: Icon(Icons.history), label: 'History'),
@@ -186,8 +265,16 @@ class _HomeDashboardState extends State<HomeDashboard> {
       return const AlertScreen();
     }
 
+    if (selectedIndex == 2) {
+      return const HistoryScreen();
+    }
+
     if (selectedIndex == 3) {
       return const AlertGuideScreen();
+    }
+
+    if (selectedIndex == 4) {
+      return const SettingsScreen();
     }
 
     return _dashboard();
@@ -209,19 +296,23 @@ class _HomeDashboardState extends State<HomeDashboard> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: Colors.green.shade100,
+                      color: fireDetectedGlobal
+                          ? Colors.red.shade100
+                          : Colors.green.shade100,
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
                       Icons.shield,
-                      color: Colors.green.shade700,
+                      color: fireDetectedGlobal
+                          ? Colors.red.shade700
+                          : Colors.green.shade700,
                       size: 35,
                     ),
                   ),
 
                   const SizedBox(width: 15),
 
-                  const Column(
+                  Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
@@ -230,14 +321,18 @@ class _HomeDashboardState extends State<HomeDashboard> {
                       ),
                       SizedBox(height: 5),
                       Text(
-                        'SAFE',
+                        fireDetectedGlobal ? 'FIRE DETECTED!' : 'SAFE',
                         style: TextStyle(
-                          color: Colors.green,
+                          color: fireDetectedGlobal ? Colors.red : Colors.green,
                           fontSize: 22,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      Text('All systems are normal'),
+                      Text(
+                        fireDetectedGlobal
+                            ? 'Emergency alert detected!'
+                            : 'All systems are normal',
+                      ),
                     ],
                   ),
                 ],
@@ -251,17 +346,24 @@ class _HomeDashboardState extends State<HomeDashboard> {
           Row(
             children: [
               Expanded(
-                child: _sensorCard('Smoke', 'Clear', Icons.cloud, Colors.green),
+                child: _sensorCard(
+                  'Smoke Level',
+                  smokeLevel == null ? '--' : smokeLevel!.toStringAsFixed(1),
+                  Icons.cloud,
+                  smokeLevel != null && smokeLevel! > 30
+                      ? Colors.red
+                      : Colors.green,
+                ),
               ),
-
               const SizedBox(width: 10),
-
               Expanded(
                 child: _sensorCard(
-                  'Flame',
-                  'No Fire',
+                  'Flame Level',
+                  flameLevel == null ? '--' : flameLevel!.toStringAsFixed(0),
                   Icons.local_fire_department,
-                  Colors.green,
+                  flameLevel != null && flameLevel! < 600
+                      ? Colors.red
+                      : Colors.green,
                 ),
               ),
             ],
@@ -273,23 +375,13 @@ class _HomeDashboardState extends State<HomeDashboard> {
             children: [
               Expanded(
                 child: _sensorCard(
-                  'Temperature',
-                  '28.6 °C',
-                  Icons.thermostat,
-                  Colors.orange,
-                ),
-              ),
-
-              const SizedBox(width: 10),
-
-              Expanded(
-                child: _sensorCard(
                   'Location',
                   'Room 3',
                   Icons.location_on,
                   Colors.blue,
                 ),
               ),
+              const Expanded(child: SizedBox()),
             ],
           ),
 
@@ -332,27 +424,6 @@ class _HomeDashboardState extends State<HomeDashboard> {
           const SizedBox(height: 20),
 
           // LIVE CAMERA BUTTON
-          SizedBox(
-            width: double.infinity,
-            height: 55,
-            child: ElevatedButton.icon(
-              icon: const Icon(Icons.camera_alt),
-              label: const Text('VIEW LIVE CAMERA'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                foregroundColor: Colors.white,
-              ),
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const LiveCameraScreen(),
-                  ),
-                );
-              },
-            ),
-          ),
-
           const SizedBox(height: 12),
 
           // TEST ALERT BUTTON
@@ -362,11 +433,34 @@ class _HomeDashboardState extends State<HomeDashboard> {
             child: OutlinedButton.icon(
               icon: const Icon(Icons.warning),
               label: const Text('TEST FIRE ALERT'),
-              onPressed: () {
-                Navigator.push(
+              onPressed: () async {
+                setState(() {
+                  fireDetectedGlobal = true;
+                });
+
+                await FirebaseFirestore.instance.collection('fire_alerts').add({
+                  'status': 'TEST FIRE DETECTED',
+                  'location': 'Room 3, Second Floor',
+                  'smoke': 'HIGH',
+                  'flame': 'DETECTED',
+                  'temperature': 86.4,
+                  'timestamp': FieldValue.serverTimestamp(),
+                });
+
+                if (alertSoundEnabled) {
+                  await audioPlayer.play(AssetSource('siren.mp3'));
+                }
+
+                if (!mounted) return;
+
+                await Navigator.push(
                   context,
                   MaterialPageRoute(builder: (context) => const AlertScreen()),
                 );
+
+                if (!mounted) return;
+
+                setState(() {});
               },
             ),
           ),
@@ -404,139 +498,6 @@ class _HomeDashboardState extends State<HomeDashboard> {
 // 3. LIVE CAMERA & SENSOR SCREEN
 // ======================================================
 
-class LiveCameraScreen extends StatelessWidget {
-  const LiveCameraScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('LIVE CAMERA')),
-
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            // CAMERA AREA
-            Container(
-              height: 250,
-              width: double.infinity,
-              decoration: BoxDecoration(
-                color: Colors.black,
-                borderRadius: BorderRadius.circular(15),
-              ),
-              child: Stack(
-                children: [
-                  const Center(
-                    child: Icon(Icons.videocam, color: Colors.white, size: 70),
-                  ),
-
-                  Positioned(
-                    top: 12,
-                    left: 12,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 5,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.red,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: const Text(
-                        '● REC',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 15),
-
-            const Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'Camera: Room 3',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-                Text('10:30:15 AM'),
-              ],
-            ),
-
-            const SizedBox(height: 25),
-
-            const Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                'Sensor Readings',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-              ),
-            ),
-
-            const SizedBox(height: 15),
-
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                _reading(Icons.cloud, 'Smoke', 'Clear', Colors.green),
-
-                _reading(
-                  Icons.local_fire_department,
-                  'Flame',
-                  'No Fire',
-                  Colors.green,
-                ),
-
-                _reading(Icons.thermostat, 'Temp.', '28.6°C', Colors.orange),
-              ],
-            ),
-
-            const SizedBox(height: 25),
-
-            SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton.icon(
-                icon: const Icon(Icons.camera),
-                label: const Text('TAKE SNAPSHOT'),
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Snapshot captured!')),
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  static Widget _reading(
-    IconData icon,
-    String title,
-    String value,
-    Color color,
-  ) {
-    return Column(
-      children: [
-        Icon(icon, size: 35, color: color),
-        const SizedBox(height: 5),
-        Text(title),
-        Text(
-          value,
-          style: TextStyle(color: color, fontWeight: FontWeight.bold),
-        ),
-      ],
-    );
-  }
-}
-
 // ======================================================
 // 4. ALERT SCREEN
 // ======================================================
@@ -546,6 +507,30 @@ class AlertScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!fireDetectedGlobal) {
+      return Scaffold(
+        appBar: AppBar(
+          backgroundColor: Colors.red,
+          foregroundColor: Colors.white,
+          title: const Text('ALERTS'),
+        ),
+        body: const Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.notifications_none, size: 80, color: Colors.green),
+              SizedBox(height: 20),
+              Text(
+                'NO ACTIVE ALERTS',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 8),
+              Text('All systems are currently normal.'),
+            ],
+          ),
+        ),
+      );
+    }
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Colors.red,
@@ -654,26 +639,6 @@ class AlertScreen extends StatelessWidget {
 
             const SizedBox(height: 20),
 
-            SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
-                  foregroundColor: Colors.white,
-                ),
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => const LiveCameraScreen(),
-                    ),
-                  );
-                },
-                child: const Text('VIEW LIVE CAMERA'),
-              ),
-            ),
-
             const SizedBox(height: 10),
 
             SizedBox(
@@ -693,6 +658,32 @@ class AlertScreen extends StatelessWidget {
             ),
 
             const SizedBox(height: 20),
+            // RETURN TO SAFE MODE
+            SizedBox(
+              width: double.infinity,
+              height: 55,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                ),
+                icon: const Icon(Icons.check_circle),
+                label: const Text('RETURN TO SAFE MODE'),
+                onPressed: () {
+                  fireDetectedGlobal = false;
+                  audioPlayer.stop();
+
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const HomeDashboard(),
+                    ),
+                  );
+                },
+              ),
+            ),
+
+            const SizedBox(height: 12),
 
             // BFP HOTLINE
             SizedBox(
@@ -728,9 +719,174 @@ class AlertScreen extends StatelessWidget {
     );
   }
 }
-
 // ======================================================
-// 5. ALERT GUIDE
+// 5. HISTORY SCREEN
+// ======================================================
+
+class HistoryScreen extends StatelessWidget {
+  const HistoryScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('HISTORY'),
+        backgroundColor: Colors.red,
+        foregroundColor: Colors.white,
+      ),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: FirebaseFirestore.instance
+            .collection('fire_alerts')
+            .orderBy('timestamp', descending: true)
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (snapshot.hasError) {
+            return const Center(child: Text('Unable to load alert history.'));
+          }
+
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+            return const Center(child: Text('No fire alerts recorded yet.'));
+          }
+
+          final alerts = snapshot.data!.docs;
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(16),
+            itemCount: alerts.length,
+            itemBuilder: (context, index) {
+              final data = alerts[index].data() as Map<String, dynamic>;
+
+              return Card(
+                margin: const EdgeInsets.only(bottom: 12),
+                child: ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor: Colors.red,
+                    child: Icon(
+                      Icons.local_fire_department,
+                      color: Colors.white,
+                    ),
+                  ),
+                  title: Text(
+                    data['status'] ?? 'UNKNOWN ALERT',
+                    style: const TextStyle(
+                      color: Colors.red,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  subtitle: Text(
+                    '${data['location'] ?? 'Unknown location'}\n'
+                    'Smoke: ${data['smoke'] ?? 'Unknown'}\n'
+                    'Flame: ${data['flame'] ?? 'Unknown'}\n'
+                    'Time: ${_formatTimestamp(data['timestamp'])}',
+                  ),
+                  isThreeLine: true,
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+String _formatTimestamp(dynamic timestamp) {
+  if (timestamp == null) {
+    return 'Time unavailable';
+  }
+
+  if (timestamp is Timestamp) {
+    final date = timestamp.toDate();
+
+    return '${date.day.toString().padLeft(2, '0')}/'
+        '${date.month.toString().padLeft(2, '0')}/'
+        '${date.year} '
+        '${date.hour.toString().padLeft(2, '0')}:'
+        '${date.minute.toString().padLeft(2, '0')}';
+  }
+
+  return 'Time unavailable';
+}
+
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({super.key});
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  bool notificationsEnabled = true;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('SETTINGS'),
+        backgroundColor: Colors.red,
+        foregroundColor: Colors.white,
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.notifications, color: Colors.red),
+              title: const Text('Notifications'),
+              subtitle: const Text('Receive fire alert notifications'),
+              trailing: Switch(
+                value: notificationsEnabled,
+                onChanged: (value) {
+                  setState(() {
+                    notificationsEnabled = value;
+                  });
+                },
+              ),
+            ),
+          ),
+
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.volume_up, color: Colors.red),
+              title: const Text('Alert Sound'),
+              subtitle: const Text('Play siren when fire is detected'),
+              trailing: Switch(
+                value: alertSoundEnabled,
+                onChanged: (value) {
+                  setState(() {
+                    alertSoundEnabled = value;
+                  });
+                },
+              ),
+            ),
+          ),
+
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.location_on, color: Colors.red),
+              title: const Text('Monitored Location'),
+              subtitle: const Text('Room 3, Second Floor'),
+            ),
+          ),
+
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.info, color: Colors.red),
+              title: const Text('About SafeFiD'),
+              subtitle: const Text('Smart Detection. Fast Alert. Safer Lives.'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+// ======================================================
+// 6. ALERT GUIDE
 // ======================================================
 
 class AlertGuideScreen extends StatelessWidget {
@@ -756,7 +912,6 @@ class AlertGuideScreen extends StatelessWidget {
 
     return Scaffold(
       appBar: AppBar(title: const Text('WHAT TO DO')),
-
       body: ListView.builder(
         padding: const EdgeInsets.all(16),
         itemCount: steps.length,
@@ -776,14 +931,11 @@ class AlertGuideScreen extends StatelessWidget {
                   ),
                 ),
               ),
-
               title: Text(
                 step[0] as String,
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
-
               subtitle: Text(step[1] as String),
-
               trailing: Icon(step[2] as IconData, color: Colors.red),
             ),
           );
@@ -792,9 +944,8 @@ class AlertGuideScreen extends StatelessWidget {
     );
   }
 }
-
 // ======================================================
-// 6. BFP HOTLINE POPUP
+// 7. BFP HOTLINE POPUP
 // ======================================================
 
 void showBfpDialog(BuildContext context) {
@@ -837,17 +988,35 @@ void showBfpDialog(BuildContext context) {
                   backgroundColor: Colors.red,
                   foregroundColor: Colors.white,
                 ),
-                onPressed: () {
-                  // PHONE CALL WILL BE CONNECTED
-                  // HERE LATER USING url_launcher.
+                onPressed: () async {
+                  final Uri phoneUri = Uri(scheme: 'tel', path: '0822910441');
 
-                  Navigator.pop(context);
+                  try {
+                    final bool launched = await launchUrl(
+                      phoneUri,
+                      mode: LaunchMode.externalApplication,
+                    );
 
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('BFP Hotline selected.')),
-                  );
+                    if (!launched) {
+                      if (!context.mounted) return;
+
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Unable to open the phone dialer.'),
+                        ),
+                      );
+                    }
+                  } catch (e) {
+                    if (!context.mounted) return;
+
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Unable to open the phone dialer.'),
+                      ),
+                    );
+                  }
                 },
-                child: const Text('CALL BFP HOTLINE'),
+                child: const Text('CALL NOW'),
               ),
             ),
 

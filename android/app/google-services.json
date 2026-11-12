@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "56086148285",
+    "project_id": "safefid",
+    "storage_bucket": "safefid.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:56086148285:android:53c9cb51698484bfd3b3d4",
+        "android_client_info": {
+          "package_name": "com.example.hello_flutter"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBs7ZrXvcEbPnjndrnmP9v0YFBH13k64ng"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
